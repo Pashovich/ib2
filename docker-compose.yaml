@@ -1,0 +1,16 @@
+version: "3"
+
+services:
+  restful-pieces:
+    build: .
+    image: restful-pieces:latest
+    container_name: restful-pieces
+    restart: on-failure
+    pids_limit: 256
+    mem_limit: 500M
+    cpus: 0.5
+    volumes:
+      - ./posts.db:/app/posts.db
+    ports:
+      - 4001:4001
+
