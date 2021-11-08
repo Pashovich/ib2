@@ -1,127 +1,109 @@
-#!/usr/bin/env python2
 
 import sqlite3
 from flask import Flask, request, jsonify
-
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import text
 DB_PATH = './posts.db'
 PORT    = 8000
 
 app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///posts.db' 
+db = SQLAlchemy(app)
+
 global storage
 storage = None
 
+
+
+class Posts(db.Model):
+    pid = db.Column(db.Integer, primary_key = True)
+    post_id = db.Column(db.Integer(),unique=True)
+    title = db.Column(db.String(100))
+    content = db.Column(db.String(100))
+    token = db.Column(db.String(100),default='')
+
+    def __init__(self, post_id, title, content, token = ''):
+        self.post_id = post_id
+        self.title = title
+        self.content = content
+        self.token = token 
+
+
+class PostsTotal(db.Model):
+    pid = db.Column(db.Integer, primary_key = True)
+    type = db.Column(db.String(100))
+    value = db.Column(db.Integer())
+
+    def __init__(self, type, value):
+        self.type = type
+        self.value = value
+
+
 class Storage:
-    def __init__(self, db_path):
-        self.db_path = db_path
-        self.priv_edge, self.pub_edge = self._get_posts_edges()
+    def __init__(self, db):
+        self.db = db
+        self.edges = {}
+        self.edges['private'], self.edges['public'] = self._get_posts_edges()
+        print(self.edges)
 
     def _get_posts_edges(self):
-        db = sqlite3.connect(self.db_path)
-        c = db.cursor()
-
-        query = '''
-            SELECT value FROM posts_total
-            WHERE type = "private" OR type = "public"
-            '''
-
-        c.execute(query)
         try:
-            priv = int(c.fetchone()[0])
-            pub = int(c.fetchone()[0])
-
+            pub = PostsTotal.query.filter(PostsTotal.type == 'public').first().value
+            priv = PostsTotal.query.filter(PostsTotal.type == 'private').first().value
         except:
-            query = '''
-                INSERT INTO posts_total(type, value)
-                VALUES(?, ?)
-                '''
-            priv, pub = 1, 1
-            c.execute(query, ('private', priv))
-            db.commit()
-
-            c.execute(query, ('public', pub))
-            db.commit()
-
+            priv, pub = 1, 1 
+            public_obj = PostsTotal(type = 'public', value = 1)
+            priavte_obj = PostsTotal(type = 'private', value = 1)
+            self.db.session.add(public_obj)
+            self.db.session.add(priavte_obj)
+            self.db.session.commit()
         return priv, pub
 
     def _inc_posts_edge(self, edge_id):
         assert edge_id in ['private', 'public']
 
-        db = sqlite3.connect(self.db_path)
-        c = db.cursor()
+        edge = PostsTotal.query.filter(PostsTotal.type == edge_id).first()
 
-        query = '''
-            UPDATE posts_total
-            SET value = ? WHERE type = ?
-            '''
+        edge.value += 1
+        self.db.session.commit()
+        self.edges[edge_id] += 1
 
-        if edge_id == 'private':
-            self.priv_edge+= 1
-            new_val = self.priv_edge
-        else:
-            self.pub_edge+= 1
-            new_val = self.pub_edge
+    def store_public_post(self, title, content):
+        self._store_post(self.edges['public'] ,title, content)
+        self._inc_posts_edge('public')
 
-        c.execute(query, (new_val, edge_id))
-        db.commit()
+        return self.edges['public']  - 1
 
-    def get_private_post(self, post_id, token):
-        db = sqlite3.connect(self.db_path)
-        c = db.cursor()
+    def store_private_post(self, title, content,token):
+        self._store_post(-self.edges['private'] ,title, content, token)
+        self._inc_posts_edge('private')
+        return -(self.edges['private'] - 1)
 
-        query = '''
-            SELECT token FROM posts
-            WHERE post_id = ?
-            '''
-        c.execute(query, [post_id])
-        stoken = c.fetchone()[0]
-        if stoken != token:
-            return None
+    def _store_post(self, post_id, title, content,token = ''):
 
-        return self._get_post(post_id)
+        post_obj = Posts(post_id = post_id, title= title, content= content, token = token)
+        self.db.session.add(post_obj)
+        self.db.session.commit()
 
     def get_public_post(self, post_id):
         return self._get_post(post_id)
 
     def _get_post(self, post_id):
-        db = sqlite3.connect(self.db_path)
-        c = db.cursor()
 
-        query = '''
-            SELECT title, content FROM posts
-            WHERE post_id = ?
-            '''
+        post = Posts.query.filter(Posts.post_id == post_id).first()
 
-        c.execute(query, [post_id])
-        post = c.fetchone()
         if post is None:
             return None
 
-        return {'title': post[0], 'content': post[1]}
+        return {'title': post.title, 'content': post.content}
 
-    def store_public_post(self, title, content):
-        self._store_post(self.pub_edge, title, content)
-        self._inc_posts_edge('public')
+    def get_private_post(self, post_id, token):
+        post = Posts.query.filter(Posts.post_id == post_id).first()
 
-        return self.pub_edge - 1
+        if post.token != token:
+            return None
 
-    def store_private_post(self, title, content, token):
-        self._store_post(-self.priv_edge, title, content, token)
-        self._inc_posts_edge('private')
-
-        return -(self.priv_edge - 1)
-
-    def _store_post(self, post_id, title, content, token=''):
-        db = sqlite3.connect(self.db_path)
-        c = db.cursor()
-
-        query = '''
-            INSERT INTO posts(post_id, title, content, token)
-            VALUES(%s, \"%s\", \"%s\", \"%s\")
-            ''' % (post_id, title, content, token)
-
-        c.execute(query)
-        db.commit()
-
+        return self._get_post(post_id)
 
 @app.route('/get', methods=['GET'])
 def get_post():
@@ -207,33 +189,10 @@ def store_post():
 
 
 if __name__ == '__main__':
-    db = sqlite3.connect(DB_PATH)
-    c = db.cursor()
-    cmd = '''
-        CREATE TABLE IF NOT EXISTS
-            posts(
-                pid INTEGER PRIMARY KEY AUTOINCREMENT,
-                post_id INTEGER,
-                title TEXT,
-                content TEXT,
-                token TEXT
-            )'''
-    c.execute(cmd)
-    db.commit()
-
-    cmd = '''
-        CREATE TABLE IF NOT EXISTS
-            posts_total(
-                pid INTEGER PRIMARY KEY AUTOINCREMENT,
-                type TEXT,
-                value INTEGER
-            )'''
-
-    c.execute(cmd)
-    db.commit()
+    db.create_all()
 
     global storage
-    storage = Storage(DB_PATH)
+    storage = Storage(db)
 
     app.run(host='0.0.0.0', port=PORT, debug=True)
 
